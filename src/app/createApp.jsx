@@ -37,6 +37,15 @@ export function createApp(bindings = {}) {
         await next();
     });
 
+    app.use('*', async (c, next) => {
+        const validToken = await runtime.kv?.get?.('ACCESS_TOKEN');
+        if (!validToken) return await next();
+        const token = c.req.query('token') || getRequestHeader(c.req, 'Authorization')?.replace(/^Bearer\s+/i, '');
+        if (token === validToken) return await next();
+        if (c.req.path !== '/' && !c.req.header('Accept')?.includes('text/html')) return c.text('Unauthorized', 401);
+        return c.html(`<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>访问验证</title><style>body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#f5f5f5}.card{background:#fff;padding:40px;border-radius:12px;box-shadow:0 2px 12px rgba(0,0,0,.1);text-align:center}h2{margin:0 0 20px;color:#333}input{padding:10px 16px;font-size:16px;width:280px;border:1px solid #ddd;border-radius:8px;outline:0}input:focus{border-color:#4f8ef7}button{margin-top:16px;padding:10px 32px;font-size:16px;background:#4f8ef7;color:#fff;border:none;border-radius:8px;cursor:pointer}button:hover{background:#3b7de6}</style></head><body><div class="card"><h2>🔐 访问验证</h2><form method="get"><input type="password" name="token" placeholder="请输入访问密钥" autofocus><br><button type="submit">确认</button></form></div></body></html>`, 401);
+    });
+
     app.get('/', (c) => {
         const t = c.get('t');
         const lang = resolveLanguage(c.get('lang'));
