@@ -11,6 +11,7 @@ import { ClashConfigBuilder } from '../builders/ClashConfigBuilder.js';
 import { SurgeConfigBuilder } from '../builders/SurgeConfigBuilder.js';
 import { createTranslator, resolveLanguage } from '../i18n/index.js';
 import { encodeBase64, tryDecodeSubscriptionLines } from '../utils.js';
+import { fetchSubscriptionWithFormat } from '../parsers/subscription/httpSubscriptionFetcher.js';
 import { APP_NAME, APP_SUBTITLE } from '../constants.js';
 import { ShortLinkService } from '../services/shortLinkService.js';
 import { ConfigStorageService } from '../services/configStorageService.js';
@@ -317,6 +318,77 @@ export function createApp(bindings = {}) {
         }
 
         return c.text(encodeBase64(finalString), 200, responseHeaders);
+    });
+
+    // subconverter-compatible endpoint, lets edgetunnel point its SUBAPI at this worker.
+    // sublink-worker uses its own rule system, so subconverter's config=/emoji/scv params are intentionally ignored.
+    app.get('/sub', async (c) => {
+        try {
+            const target = c.req.query('target') || 'mixed';
+            const url = c.req.query('url');
+            if (!url) {
+                return c.text('Missing url parameter', 400);
+            }
+
+            // Map subconverter target to internal builders; unsupported targets fail loudly instead of degrading.
+            const builderType = (() => {
+                const t = target.toLowerCase();
+                if (t === 'clash' || t === 'mixed') return 'clash';
+                if (t === 'singbox' || t === 'sing-box') return 'singbox';
+                if (t.startsWith('surge')) return 'surge';
+                return null;
+            })();
+            if (!builderType) {
+                return c.text(`Unsupported target: ${target}. Supported: clash, singbox, surge, mixed`, 400);
+            }
+
+            const ua = c.req.query('ua') || getRequestHeader(c.req, 'User-Agent') || DEFAULT_USER_AGENT;
+            const fetched = await fetchSubscriptionWithFormat(url, ua);
+            if (!fetched || !fetched.content) {
+                return c.text('Failed to fetch subscription url', 400);
+            }
+
+            const selectedRules = PREDEFINED_RULE_SETS.balanced;
+            const lang = c.get('lang');
+
+            if (builderType === 'clash') {
+                const builder = new ClashConfigBuilder(
+                    fetched.content, selectedRules, [], undefined, lang, ua,
+                    false, false, undefined, undefined, true
+                );
+                await builder.build();
+                const headers = { 'Content-Type': 'text/yaml; charset=utf-8' };
+                if (fetched.subscriptionUserinfo) {
+                    headers['subscription-userinfo'] = fetched.subscriptionUserinfo;
+                }
+                return c.text(builder.formatConfig(), 200, headers);
+            }
+
+            if (builderType === 'singbox') {
+                const builder = new SingboxConfigBuilder(
+                    fetched.content, selectedRules, [], SING_BOX_CONFIG, lang, ua,
+                    false, false, undefined, undefined, undefined, true
+                );
+                await builder.build();
+                if (fetched.subscriptionUserinfo) {
+                    c.header('subscription-userinfo', fetched.subscriptionUserinfo);
+                }
+                return c.json(builder.config);
+            }
+
+            const surgeBuilder = new SurgeConfigBuilder(
+                fetched.content, selectedRules, [], undefined, lang, ua,
+                false, true
+            );
+            surgeBuilder.setSubscriptionUrl(c.req.url);
+            await surgeBuilder.build();
+            if (fetched.subscriptionUserinfo) {
+                c.header('subscription-userinfo', fetched.subscriptionUserinfo);
+            }
+            return c.text(surgeBuilder.formatConfig());
+        } catch (error) {
+            return handleError(c, error, runtime.logger);
+        }
     });
 
     app.get('/shorten-v2', async (c) => {
